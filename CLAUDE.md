@@ -38,29 +38,36 @@ even though rigor (error handling, retries, auth hardening) is intentionally kep
   point of this project is to see the raw mechanics.
 
 ## Current status
-Stage: Lesson 4 (`agent.py`) done — all four planned files for the search-tool
-slice are now written. `tools/registry.py` and `tools/search_tool.py` were
-revised mid-build to be async (see standing rule below), and `agent.py`
-handles a single tool-call round only (ask → tool → final answer), not a
-general loop — reverted from an initial general `while True` version per
-explicit user request. Multiple simultaneous `toolUse` blocks in one turn
-still run concurrently via `asyncio.gather`, but a model wanting to chain a
-*second* round of tool calls after seeing the first result isn't supported —
-would need the loop reinstated later if that's ever needed.
+Stage: Lesson 4 (`agent.py`) done and **verified working live end-to-end**.
+AWS Bedrock permissions on the `Artha-stg-dev` SSO role were fixed (was
+previously blocked — see Known gaps for the full diagnosis history, kept for
+reference). A real run (question: SpaceX Starship news) correctly triggered
+`web_search`, executed it, sent the result back, and got a grounded final
+answer from Nova Pro.
 
-**Blocked on AWS permissions, not code**: the live end-to-end test hit
-`AccessDeniedException` — the `Artha-stg-dev` SSO role lacks
-`bedrock:InvokeModel` permission. Every code path (env config, `boto3`
-session/client, request building, the agent loop) executed correctly up to
-the actual AWS call. Logged under Known gaps; re-test once permissions are
-granted or a working profile is supplied. Waiting on user for what's next —
-either fix AWS access and confirm a live run, or move on to planning
-additional tools.
+`agent.py` now also has step-by-step `print()`/`_dump()` tracing added
+(unprompted-lesson-wise this was a direct user request, not a new numbered
+lesson) so the full model <-> tool conversation is visible when run
+interactively: outgoing messages, the model's raw response + stopReason,
+which tool(s) it requested and with what args, the tool's result, the
+outgoing toolResult message, and the final answer. `tools/registry.py` and
+`tools/search_tool.py` were revised mid-build to be async (see standing rule
+below), and `agent.py` handles a single tool-call round only (ask → tool →
+final answer), not a general loop — reverted from an initial general
+`while True` version per explicit user request. Multiple simultaneous
+`toolUse` blocks in one turn still run concurrently via `asyncio.gather`,
+but a model wanting to chain a *second* round of tool calls after seeing
+the first result isn't supported — would need the loop reinstated later if
+that's ever needed.
 
 Also: an earlier mistake pasted the real `TAVILY_API_KEY` into
 `.env.example` instead of `.env` — caught and fixed before any commit
-reached GitHub (see `.env.example` is still tracked/committable, `.env` is
-git-ignored and holds the real value).
+reached GitHub.
+
+A scratch file `llm_test.py` also exists (not part of the numbered lesson
+sequence) — a standalone `langchain_aws`-based diagnostic script used while
+debugging the AWS permission issue. Not currently referenced by
+`agent.py`/other files; keep or delete at user's discretion.
 
 ## Standing rule addition
 - All tool functions (anything registered via `@tool(...)`) must be
@@ -68,6 +75,15 @@ git-ignored and holds the real value).
   libraries only inside tool implementations (e.g. `httpx`, not `requests`).
 - `agent.py`'s loop is single-round by design (not a general loop) — this was
   an explicit user choice, not a default to "improve" without asking first.
+- **Cost-aware provider choice**: any future tool that has both a free/cheap
+  option and a paid/premium option must expose a `provider` parameter in its
+  schema (optional, not required) letting the model choose at request time.
+  Default to the free option if the model omits it — cost-safety should be
+  the fallback behavior, not something the model has to remember to ask
+  for. The schema description should explicitly tell the model to prefer
+  the free option and only reach for the paid one when it's insufficient.
+  `tools/search_tool.py`'s `provider: "duckduckgo" | "tavily"` is the
+  reference example for this pattern.
 
 ## Planned build order
 1. `llm.py` — pure-`boto3` Bedrock Converse API wrapper (rewrite of the
@@ -79,9 +95,17 @@ git-ignored and holds the real value).
    that calls the Tavily API via `httpx`. — **DONE**
 4. `agent.py` — single-round agent loop: send message + tools, detect
    `toolUse`, execute via registry (concurrently if multiple), send
-   `toolResult` back, print final answer. — **DONE** (untested live, blocked
-   on AWS Bedrock permissions — see Current status)
-5. (Future) additional tools under `tools/` — calculator, file I/O, SQL, etc.
+   `toolResult` back, print final answer. — **DONE, verified live** (see
+   Current status)
+5. `main.py` — FastAPI app: one POST endpoint per registered tool
+   (`/tools/<name>`), with a Pydantic request model dynamically generated
+   from each tool's `inputSchema`, so Swagger UI (`/docs`) shows real typed
+   fields (required/optional, descriptions) per tool with zero manual
+   per-tool route code. Calls `call_tool(name, arguments)` — same dispatch
+   `agent.py` uses, no LLM involved. Revised from an initial interactive
+   CLI-prompt version (see "main.py history" below) per explicit user
+   request. — **DONE**
+6. (Future) additional tools under `tools/` — calculator, file I/O, SQL, etc.
    — each one lesson, following the Lesson 3 pattern. Not yet planned in
    detail. — **NEXT (once user decides)**
 
@@ -102,6 +126,26 @@ git-ignored and holds the real value).
 8. `agent.py` — single-round agent loop; imports `get_llm` from `llm.py` and
    `call_tool`/`get_tool_specs` from `tools/registry.py` (plus
    `tools/search_tool.py` for its registration side effect)
+9. `main.py` — FastAPI app; imports `call_tool`/`get_tool_specs` from
+   `tools/registry.py` (plus `tools/search_tool.py` for registration). Does
+   NOT import `llm.py` — no model call involved, by design.
+
+## main.py history
+- Originally an interactive CLI script: printed available tools, prompted
+  for a tool name + JSON input, called `call_tool(...)`, printed the
+  result. Later hardened to fail gracefully (clear message instead of a
+  traceback) on invalid JSON / unknown tool name / wrong arguments, after
+  real usage hit both.
+- Converted to a FastAPI app per explicit user request: one `POST
+  /tools/<name>` endpoint per registered tool, so Swagger UI at `/docs`
+  gives a proper typed form per tool (required/optional fields +
+  descriptions, pulled from `inputSchema`) instead of typing raw JSON at a
+  terminal prompt. Run with `uvicorn main:app --reload`.
+- Note: `request_model` / `search_tool` import show as "not accessed" in
+  the editor — expected: `request_model` is used inside the closure
+  `_make_endpoint` builds (for FastAPI's request validation), and
+  `search_tool` is imported purely for its `@tool(...)` registration side
+  effect. Not bugs.
 
 (`tools/__init__.py` was also created, as an empty package marker — not
 numbered, per the usual convention.)
@@ -112,7 +156,7 @@ file, so it isn't numbered here.)
 ## Environment
 - Activate venv: `source .venv/bin/activate`
 - Install deps: `pip install -r requirements.txt` (currently `boto3`,
-  `python-dotenv`, `httpx`)
+  `python-dotenv`, `httpx`, `ddgs`)
 - Run: `python agent.py`, then type a question at the `Ask something:`
   prompt. Currently blocked on AWS Bedrock permissions (see Current status).
 - Copy `.env.example` to `.env` and fill in real values (AWS profile, model
@@ -131,23 +175,23 @@ file, so it isn't numbered here.)
 - `agent.py` handles only a single tool-call round — a model wanting to
   chain a second round of tool calls after seeing the first result isn't
   supported yet (deliberate, per user request, not an oversight).
-- Live end-to-end run is blocked: current AWS SSO role
-  (`AWSReservedSSO_ArthaStgEksDeveloper`, profile `Artha-stg-dev`) lacks
-  `bedrock:InvokeModel` permission — confirmed via `aws sts
-  get-caller-identity` (valid creds) plus `bedrock:ListFoundationModels` /
-  `bedrock:InvokeModel` denied in every region tested (us-east-1, us-west-2,
-  ap-south-1 — the profile's own default region). This is a flat IAM policy
-  gap on this role, not a regional restriction. Code has not been verified
-  against a real Bedrock response yet — only against the request-building
-  path.
-  - Root cause understood: a separate deployed API (a text-to-SQL service)
-    that also calls an LLM works fine — it runs under a different identity
-    (likely an EKS pod/service-account IAM role via IRSA), not the personal
-    SSO login role used here. Personal dev roles and service roles commonly
-    have different permissions by design. Fix requires an Artha AWS admin to
-    grant Bedrock permissions to the `ArthaStgEksDeveloper` SSO role (or
-    provide an alternate profile that already has them) — not fixable from
-    this repo's code.
+- **RESOLVED (was blocked for a while)**: live end-to-end run was blocked by
+  an AWS IAM permission gap on the `Artha-stg-dev` SSO role
+  (`bedrock:InvokeModel` denied in every region tested — us-east-1,
+  us-west-2, ap-south-1). Confirmed independently four separate ways (raw
+  `boto3`, `langchain_aws`, direct AWS CLI, and a standalone `llm_test.py`
+  script) that it was a role-level IAM gap, not a code/library issue —
+  root cause: a separate deployed API (a text-to-SQL service) that also
+  calls an LLM works fine because it runs under a different identity
+  (likely an EKS pod/service-account IAM role via IRSA), not the personal
+  SSO login role used locally here. Permissions have since been
+  granted/fixed on the AWS side (exact fix made outside this repo) —
+  `agent.py` now runs successfully end-to-end against Nova Pro with the
+  `web_search` tool. Kept this history in case access regresses again.
+- `.env`'s `BEDROCK_CHAT_MODEL_ID` now uses the direct model ID
+  (`amazon.nova-pro-v1:0`) rather than the cross-region inference profile ID
+  (`us.amazon.nova-pro-v1:0`) that's `get_llm()`'s code default — this is
+  what ended up working live.
 
 ## Companion file
 See `NOTES.md` for the plain-language, no-analogy study notes, the file-creation
