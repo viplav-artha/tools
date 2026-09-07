@@ -34,10 +34,13 @@ node is numbered by creation order.
      |
      v
 [8] agent.py
+     |
+     v
+[9] main.py
 ```
 
-This completes the first slice of the build (search tool + agent loop).
-Future tools each become the next node.
+This completes the first slice of the build (search tool + agent loop +
+direct tool tester). Future tools each become the next node.
 
 ## Routes Graph (import / dependency connections)
 
@@ -64,6 +67,10 @@ is Timeline `[7]` but Routes Graph node `3`, and it DOES import from node 2
 Graph node `4` — it imports from node 1 (`get_llm` from `llm.py`), node 2
 (`call_tool`, `get_tool_specs` from `tools/registry.py`), and node 3
 (`tools/search_tool.py`, imported for its registration side effect).
+`main.py` is Timeline `[9]` but Routes Graph node `5` — it imports from node
+2 (`call_tool`, `get_tool_specs`) and node 3 (`tools/search_tool.py`, for
+registration), same as `agent.py`, but does NOT import node 1 (`llm.py`) —
+it never calls the model at all, by design.
 (`.gitignore`, `README.md`, `requirements.txt`, `.env.example`, and
 `tools/__init__.py` are all excluded from this graph by the rule above.)
 
@@ -83,10 +90,13 @@ graph TD
     n2["[2] tools/registry.py"]
     n3["[3] tools/search_tool.py"]
     n4["[4] agent.py"]
+    n5["[5] main.py"]
     n2 -->|tool decorator| n3
     n1 -->|get_llm| n4
     n2 -->|call_tool, get_tool_specs| n4
     n3 -->|registers web_search| n4
+    n2 -->|call_tool, get_tool_specs| n5
+    n3 -->|registers web_search| n5
 ```
 
 ## File notes
@@ -161,6 +171,14 @@ chat and in CLAUDE.md, not here).
   snippet) into one numbered plain-text string. (Revised after initial
   write: switched from sync `requests` to async `httpx` so every tool
   function can be `async def`.)
+- Revision: added a free DuckDuckGo search path (`_search_duckduckgo`, via
+  the `ddgs` package, wrapped in `asyncio.to_thread` since `ddgs` itself is
+  synchronous) alongside the existing Tavily path. `web_search` gained an
+  optional `provider` schema parameter (`"duckduckgo"` default, `"tavily"`
+  as the paid alternative) so the model itself decides which to use per
+  request — the schema description nudges it to prefer the free option and
+  only use Tavily when results are insufficient. Verified live: the model
+  chose `provider: "duckduckgo"` on its own for a real question.
 
 ### [8] agent.py
 - Motive: Drive an actual conversation between the LLM and the tools —
@@ -178,3 +196,34 @@ chat and in CLAUDE.md, not here).
   chaining a second round of tool calls after seeing the first result is
   not currently handled. `main()` reads a question from the terminal and
   runs everything via `asyncio.run()`.
+- Revision: added numbered, labeled `print()`/`_dump()` tracing throughout
+  `run()` (outgoing messages, the model's raw response and `stopReason`,
+  which tool(s) were requested and with what arguments, each tool's result,
+  the outgoing `toolResult` message, and the final answer) so the full
+  model <-> tool conversation is visible when run interactively. Verified
+  live end-to-end: a SpaceX Starship news question correctly triggered
+  `web_search`, executed it, and produced a grounded final answer.
+
+### [9] main.py
+- Motive: Let a tool be tested directly, without needing a live model call
+  to trigger it, while still exercising the exact same code path the model
+  would — so it's a real test of the tool, not a bypass of the mechanism.
+- Logic (current, FastAPI version): for every tool in `get_tool_specs()`,
+  `_build_request_model()` reads its `inputSchema` and dynamically builds a
+  matching Pydantic model (`create_model(...)`) — mapping JSON-schema types
+  to Python types, marking fields required/optional exactly as the schema
+  says, and carrying over each field's description. `_make_endpoint()`
+  returns an async handler that takes that model as its request body, calls
+  `call_tool(name, arguments)` — the identical dispatch `agent.py` uses —
+  and returns the result as JSON. A loop over `get_tool_specs()` registers
+  one `POST /tools/<name>` route per tool via `app.add_api_route(...)`, so
+  a new tool gets its own documented endpoint automatically with no manual
+  route code. Run with `uvicorn main:app --reload`; Swagger UI at `/docs`
+  shows each tool's real parameters as a typed form.
+- History: originally an interactive CLI script (prompted for tool name +
+  JSON input at the terminal, hardened to fail gracefully on bad input) —
+  converted to FastAPI per explicit user request so tools could be tested
+  via Swagger UI's "Try it out" instead of typing raw JSON at a prompt.
+  Default port changed from `8000` to `8100` (configurable via a `PORT` env
+  var, same pattern as the rest of the project's config) since `8000` was
+  already used by another of the user's applications.
