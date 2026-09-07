@@ -1,1 +1,3 @@
-# Add dependencies here, e.g. pip freeze > requirements.txt
+boto3
+python-dotenv
+httpx
