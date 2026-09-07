@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, create_model
 
-from tools import search_tool  # noqa: F401 (side effect: registers web_search)
+from tools import get_current_time, web_search  # noqa: F401 (registers tools)
 from tools.registry import call_tool, get_tool_specs
 
 load_dotenv()

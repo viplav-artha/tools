@@ -30,13 +30,16 @@ node is numbered by creation order.
 [6] tools/registry.py
      |
      v
-[7] tools/search_tool.py
+[7] tools/web_search.py
      |
      v
 [8] agent.py
      |
      v
 [9] main.py
+     |
+     v
+[10] tools/get_current_time.py
 ```
 
 This completes the first slice of the build (search tool + agent loop +
@@ -61,16 +64,20 @@ graph only — it does NOT match the Timeline number for the same file.**
 `llm.py` is Timeline `[5]` but Routes Graph node `1`. `tools/registry.py` is
 Timeline `[6]` but Routes Graph node `2` — and it does NOT import `llm.py`
 (the dependency runs the other way: `agent.py` will import both and wire
-them together), so there's no edge between them yet. `tools/search_tool.py`
+them together), so there's no edge between them yet. `tools/web_search.py`
 is Timeline `[7]` but Routes Graph node `3`, and it DOES import from node 2
 (`tool` from `tools/registry.py`). `agent.py` is Timeline `[8]` but Routes
 Graph node `4` — it imports from node 1 (`get_llm` from `llm.py`), node 2
 (`call_tool`, `get_tool_specs` from `tools/registry.py`), and node 3
-(`tools/search_tool.py`, imported for its registration side effect).
+(`tools/web_search.py`, imported for its registration side effect).
 `main.py` is Timeline `[9]` but Routes Graph node `5` — it imports from node
-2 (`call_tool`, `get_tool_specs`) and node 3 (`tools/search_tool.py`, for
+2 (`call_tool`, `get_tool_specs`) and node 3 (`tools/web_search.py`, for
 registration), same as `agent.py`, but does NOT import node 1 (`llm.py`) —
-it never calls the model at all, by design.
+it never calls the model at all, by design. `tools/get_current_time.py` is
+Timeline `[10]` but Routes Graph node `6` — it imports only `tool` from
+node 2 (`tools/registry.py`), nothing else within this repo. `agent.py`
+(node 4) and `main.py` (node 5) both now also import it for registration,
+alongside `tools/web_search.py`.
 (`.gitignore`, `README.md`, `requirements.txt`, `.env.example`, and
 `tools/__init__.py` are all excluded from this graph by the rule above.)
 
@@ -88,7 +95,7 @@ unnecessary, since the labels carry that information directly.
 graph TD
     n1["[1] llm.py"]
     n2["[2] tools/registry.py"]
-    n3["[3] tools/search_tool.py"]
+    n3["[3] tools/web_search.py"]
     n4["[4] agent.py"]
     n5["[5] main.py"]
     n2 -->|tool decorator| n3
@@ -97,6 +104,10 @@ graph TD
     n3 -->|registers web_search| n4
     n2 -->|call_tool, get_tool_specs| n5
     n3 -->|registers web_search| n5
+    n6["[6] tools/get_current_time.py"]
+    n2 -->|tool decorator| n6
+    n6 -->|registers get_current_time| n4
+    n6 -->|registers get_current_time| n5
 ```
 
 ## File notes
@@ -158,7 +169,7 @@ chat and in CLAUDE.md, not here).
   unknown. (Revised after initial write: `call_tool` is `async def`, since
   every registered tool function must itself be `async def`.)
 
-### [7] tools/search_tool.py
+### [7] tools/web_search.py
 - Motive: Provide the first real tool capability — letting the LLM look up
   current information from the web — built on the registration pattern from
   `tools/registry.py`.
@@ -227,3 +238,20 @@ chat and in CLAUDE.md, not here).
   Default port changed from `8000` to `8100` (configurable via a `PORT` env
   var, same pattern as the rest of the project's config) since `8000` was
   already used by another of the user's applications.
+
+### [10] tools/get_current_time.py
+- Motive: A model has no reliable built-in sense of "today's date" or the
+  current time in a given place — this is the simplest possible tool that
+  fixes that, and was deliberately chosen as the first tool after the
+  search tool because it needs no external API, no cost, and no
+  free/paid provider split.
+- Logic: `get_current_time(timezone: str = "UTC")` resolves the given IANA
+  timezone name via the standard library's `zoneinfo.ZoneInfo`, catches
+  `ZoneInfoNotFoundError` and re-raises it as a plain `ValueError` with a
+  clear message (matching the "fail loudly" pattern from
+  `tools/web_search.py`), then returns `datetime.now(zone)` formatted with
+  the zone's abbreviation and UTC offset. `timezone` is optional in the
+  schema (defaults to `"UTC"` if the model omits it). Still `async def` per
+  the project's standing rule, even though there's no actual I/O to await.
+  Verified live: asked "what time is it in Tokyo," the model correctly
+  called `get_current_time(timezone="Asia/Tokyo")`.
