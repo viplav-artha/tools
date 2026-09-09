@@ -51,7 +51,7 @@ lesson) so the full model <-> tool conversation is visible when run
 interactively: outgoing messages, the model's raw response + stopReason,
 which tool(s) it requested and with what args, the tool's result, the
 outgoing toolResult message, and the final answer. `tools/registry.py` and
-`tools/search_tool.py` were revised mid-build to be async (see standing rule
+`tools/web_search.py` were revised mid-build to be async (see standing rule
 below), and `agent.py` handles a single tool-call round only (ask → tool →
 final answer), not a general loop — reverted from an initial general
 `while True` version per explicit user request. Multiple simultaneous
@@ -82,7 +82,7 @@ debugging the AWS permission issue. Not currently referenced by
   the fallback behavior, not something the model has to remember to ask
   for. The schema description should explicitly tell the model to prefer
   the free option and only reach for the paid one when it's insufficient.
-  `tools/search_tool.py`'s `provider: "duckduckgo" | "tavily"` is the
+  `tools/web_search.py`'s `provider: "duckduckgo" | "tavily"` is the
   reference example for this pattern.
 
 ## Planned build order
@@ -91,7 +91,7 @@ debugging the AWS permission issue. Not currently referenced by
 2. `tools/registry.py` — hand-written JSON-schema tool spec format + a
    registry/dispatch pattern (schema list for `toolConfig`, name → function
    lookup for execution), async `call_tool()`. — **DONE**
-3. `tools/search_tool.py` — the search tool itself: schema + async function
+3. `tools/web_search.py` — the search tool itself: schema + async function
    that calls the Tavily API via `httpx`. — **DONE**
 4. `agent.py` — single-round agent loop: send message + tools, detect
    `toolUse`, execute via registry (concurrently if multiple), send
@@ -105,9 +105,23 @@ debugging the AWS permission issue. Not currently referenced by
    `agent.py` uses, no LLM involved. Revised from an initial interactive
    CLI-prompt version (see "main.py history" below) per explicit user
    request. — **DONE**
-6. (Future) additional tools under `tools/` — calculator, file I/O, SQL, etc.
-   — each one lesson, following the Lesson 3 pattern. Not yet planned in
-   detail. — **NEXT (once user decides)**
+6. `tools/get_current_time.py` — `get_current_time(timezone="UTC")` using
+   `zoneinfo`; simplest possible additional tool (no external API, no paid
+   provider needed). — **DONE**
+7. (Future) additional tools under `tools/` — sandboxed code execution
+   (recommended next), SQL query tool, generic HTTP tool, file I/O,
+   human-in-the-loop approval, memory/notes. Per-tool prerequisites are
+   given just before each one, not all upfront — user preference, recorded
+   in "Per-tool teaching style" below. — **NEXT (once user decides which)**
+
+## Per-tool teaching style (this project's own preference, NOT a change to
+## the global teach-build skill)
+For each future tool, give a short, tool-specific prerequisite check (only
+the concept(s) that specific tool actually introduces) immediately before
+proposing that tool's lesson plan — not one big prerequisite dump upfront
+covering every future tool. User wants to digest one tool's concepts at a
+time, in sequence. This is a per-project preference, not a global skill
+change — do not edit the teach-build skill files themselves.
 
 ## Files created so far (chronological)
 1. `.gitignore` — standard Python gitignore (from init-project bootstrap)
@@ -120,15 +134,19 @@ debugging the AWS permission issue. Not currently referenced by
 6. `tools/registry.py` — `@tool(...)` decorator + `get_tool_specs()` /
    `call_tool()`; doesn't import `llm.py` (it's consumed by it via
    `agent.py`, not the other way around)
-7. `tools/search_tool.py` — `web_search` tool: imports `tool` from
+7. `tools/web_search.py` — `web_search` tool: imports `tool` from
    `tools/registry.py`, calls Tavily's REST API via `httpx` (async; revised
    from an initial sync `requests` version)
 8. `agent.py` — single-round agent loop; imports `get_llm` from `llm.py` and
    `call_tool`/`get_tool_specs` from `tools/registry.py` (plus
-   `tools/search_tool.py` for its registration side effect)
+   `tools/web_search.py` for its registration side effect)
 9. `main.py` — FastAPI app; imports `call_tool`/`get_tool_specs` from
-   `tools/registry.py` (plus `tools/search_tool.py` for registration). Does
+   `tools/registry.py` (plus `tools/web_search.py` for registration). Does
    NOT import `llm.py` — no model call involved, by design.
+10. `tools/get_current_time.py` — `get_current_time` tool using the standard
+    library `zoneinfo`; no imports from other project files (pure stdlib +
+    `tools/registry.py`'s `tool` decorator). `agent.py` and `main.py` both
+    updated to import it for registration.
 
 ## main.py history
 - Originally an interactive CLI script: printed available tools, prompted
@@ -161,7 +179,7 @@ file, so it isn't numbered here.)
   prompt. Currently blocked on AWS Bedrock permissions (see Current status).
 - Copy `.env.example` to `.env` and fill in real values (AWS profile, model
   ID, region, and a Tavily API key from https://tavily.com) before `llm.py`
-  or `tools/search_tool.py` can be used live.
+  or `tools/web_search.py` can be used live.
 - External services: AWS Bedrock (via AWS SSO profile, env var `AWS_PROFILE`)
   for the LLM; Tavily API (env var `TAVILY_API_KEY`) for the search tool.
   Both keys/config live in a git-ignored `.env` (a `.env.example` with
